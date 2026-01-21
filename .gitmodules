@@ -1,0 +1,9 @@
+[submodule "data/xwing-data2"]
+	path = xwing-data2
+	url = https://github.com/xwingtmg/xwing-data2.git
+[submodule "data/xwing-data2-legacy"]
+	path = xwing-data2-legacy
+	url = https://github.com/SogeMoge/xwing-data2-legacy.git
+[submodule "assets/xwing-miniatures-font"]
+	path = xwing-miniatures-font
+	url = https://github.com/SogeMoge/xwing-miniatures-font.git
