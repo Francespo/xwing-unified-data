@@ -6,4 +6,4 @@
 	url = https://github.com/SogeMoge/xwing-data2-legacy.git
 [submodule "assets/xwing-miniatures-font"]
 	path = xwing-miniatures-font
-	url = https://github.com/SogeMoge/xwing-miniatures-font.git
+	url = https://github.com/Francespo/xwing-miniatures-font.git
