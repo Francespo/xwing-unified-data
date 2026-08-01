@@ -4,6 +4,7 @@
 [submodule "data/xwing-data2-legacy"]
 	path = xwing-data2-legacy
 	url = https://github.com/Darker333/xwing-data2-legacy.git
+	branch = master
 [submodule "assets/xwing-miniatures-font"]
 	path = xwing-miniatures-font
 	url = https://github.com/Francespo/xwing-miniatures-font.git
