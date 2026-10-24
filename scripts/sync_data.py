@@ -191,12 +191,14 @@ def auto_detect_points_history():
             changelog_dir = LEGACY_DIR / "changelog"
             candidates = []
             if changelog_dir.exists():
-                for report in changelog_dir.glob("*-points-update.md"):
+                for report in sorted(changelog_dir.glob("*.md")):
                     month_match = re.match(r"(\d{4})-(\d{2})", report.name)
                     if not month_match:
                         continue
                     year, month = int(month_match.group(1)), int(month_match.group(2))
                     text = report.read_text(encoding="utf-8", errors="replace")
+                    if "Total Cards Updated" not in text and "Points Update" not in text:
+                        continue
 
                     date_match = re.search(r"\*\*Date\*\*:\s*(\d{4}-\d{2}-\d{2})", text)
                     report_date = date_match.group(1) if date_match else ""
