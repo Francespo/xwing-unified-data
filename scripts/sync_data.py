@@ -5,14 +5,15 @@ sync_data.py — Synchronize X-Wing game data across submodules and auto-detect 
 Designed for Francespo/xwing-unified-data:
 1. Submodules: update `xwing-data2`, `xwing-data2-legacy`, `xwing-miniatures-font`
 2. J1mBob: fetch & merge card/asset fixes from `https://github.com/J1mBob/xwing-data2.git`
-3. Legacy (Darker333 / SogeMoge): fetch & merge updates for `xwing-data2-legacy`
+3. Legacy (SogeMoge): fetch & merge updates for `xwing-data2-legacy`
+   (`Darker333/xwing-data2-legacy` stopped at March 2026 and is no longer the source)
 4. YASB (Raithos): parse instant points and loadouts from `https://github.com/raithos/xwing`
 5. Points Detection: inspect commit history and data diffs to automatically detect points balance updates
    and update points_history/*.json files.
 """
 
 import argparse
-from datetime import datetime
+from datetime import date, datetime, timedelta
 import json
 import os
 from pathlib import Path
@@ -68,20 +69,20 @@ def sync_j1mbob():
         print("Notice: merge conflicts or non-fast-forward merge. Resetting or keeping local changes.")
 
 
-def sync_legacy_darker():
-    """Fetch and merge latest points from Darker333 / SogeMoge into xwing-data2-legacy."""
-    print("\n=== Sincronizzazione da Darker333 / SogeMoge (xwing-data2-legacy) ===")
+def sync_legacy_sogemoge():
+    """Fetch and merge latest points from SogeMoge/xwing-data2-legacy."""
+    print("\n=== Sincronizzazione da SogeMoge (xwing-data2-legacy) ===")
     if not LEGACY_DIR.exists():
         print(f"Directory {LEGACY_DIR} does not exist.")
         return
 
     remotes_res = run_cmd(["git", "remote"], cwd=LEGACY_DIR, check=False)
     remotes = remotes_res.stdout.split()
-    if "darker" not in remotes:
-        run_cmd(["git", "remote", "add", "darker", "https://github.com/Darker333/xwing-data2-legacy.git"], cwd=LEGACY_DIR)
+    if "sogemoge" not in remotes:
+        run_cmd(["git", "remote", "add", "sogemoge", "https://github.com/SogeMoge/xwing-data2-legacy.git"], cwd=LEGACY_DIR)
 
-    run_cmd(["git", "fetch", "darker"], cwd=LEGACY_DIR)
-    run_cmd(["git", "merge", "darker/master", "--no-edit"], cwd=LEGACY_DIR, check=False)
+    run_cmd(["git", "fetch", "sogemoge"], cwd=LEGACY_DIR)
+    run_cmd(["git", "merge", "sogemoge/master", "--no-edit"], cwd=LEGACY_DIR, check=False)
 
 
 def normalize_xws(name: str) -> str:
@@ -181,41 +182,67 @@ def auto_detect_points_history():
                 leg_hist = json.load(f)
 
             current_latest = leg_hist.get("latest_date", "2020-01-01")
-            cmd = [
-                "git", "log", f"--since={current_latest}",
-                "--format=%ad|%h|%s", "--date=short",
-                "--", "data/pilots", "data/upgrades"
-            ]
-            res = subprocess.run(cmd, cwd=LEGACY_DIR, capture_output=True, text=True)
-            commits = [line.strip() for line in res.stdout.strip().split("\n") if line.strip()]
 
-            new_commits = []
-            for c in commits:
-                parts = c.split("|", 2)
-                if len(parts) == 3:
-                    c_date, c_hash, c_subj = parts
-                    if c_date > current_latest:
-                        new_commits.append((c_date, c_hash, c_subj))
+            # The legacy repo ships a validation report per points release
+            # (changelog/YYYY-MM-points-update.md). Use that instead of "the
+            # newest commit touching data/pilots or data/upgrades": the latter
+            # picks non-points commits such as the 2026-09-27 upgrade-card
+            # restrictions and records the wrong version/date.
+            changelog_dir = LEGACY_DIR / "changelog"
+            candidates = []
+            if changelog_dir.exists():
+                for report in changelog_dir.glob("*-points-update.md"):
+                    month_match = re.match(r"(\d{4})-(\d{2})", report.name)
+                    if not month_match:
+                        continue
+                    year, month = int(month_match.group(1)), int(month_match.group(2))
+                    text = report.read_text(encoding="utf-8", errors="replace")
 
-            if new_commits:
-                latest_commit = new_commits[0]
-                new_date, new_hash, new_subj = latest_commit
-                print(f"[Legacy] Detected newer points update commit: {new_date} - {new_subj} ({new_hash})")
+                    date_match = re.search(r"\*\*Date\*\*:\s*(\d{4}-\d{2}-\d{2})", text)
+                    report_date = date_match.group(1) if date_match else ""
+                    # Older reports were generated when the update was applied,
+                    # not when it was released (e.g. the 2026-03 report says
+                    # 2026-09-05). The filename month is authoritative; use the
+                    # last day of that month when the report date disagrees.
+                    if report_date[:7] != f"{year:04d}-{month:02d}":
+                        if month == 12:
+                            last_day = date(year + 1, 1, 1) - timedelta(days=1)
+                        else:
+                            last_day = date(year, month + 1, 1) - timedelta(days=1)
+                        report_date = last_day.isoformat()
+
+                    if report_date <= current_latest:
+                        continue
+
+                    total_match = re.search(r"\*\*Total Cards Updated\*\*:\s*(\d+)", text)
+                    total = int(total_match.group(1)) if total_match else None
+                    candidates.append((report_date, year, month, total, report))
+
+            if candidates:
+                report_date, year, month, total, report = max(candidates, key=lambda c: c[0])
+                version = date(year, month, 1).strftime("%B %Y")
+                description = (
+                    f"{total} cards updated (pilots and upgrades)."
+                    if total is not None
+                    else "Points and balance update."
+                )
+                print(f"[Legacy] Detected points update report: {report_date} - {report.name}")
 
                 new_entry = {
-                    "date": new_date,
-                    "version": new_subj,
-                    "description": f"Automated points update from xwing-data2-legacy ({new_hash})",
+                    "date": report_date,
+                    "version": version,
+                    "name": f"{version} Points Update",
+                    "description": description,
                     "steward": "X-Wing 2.0 Legacy (X2PO)",
-                    "highlights": [f"Commit {new_hash}: {new_subj}"],
+                    "highlights": [f"Changelog: {report.name}"],
                 }
                 leg_hist["updates"].insert(0, new_entry)
-                leg_hist["latest_date"] = new_date
+                leg_hist["latest_date"] = report_date
 
                 with open(legacy_history_file, "w", encoding="utf-8") as f:
                     json.dump(leg_hist, f, indent=2, ensure_ascii=False)
                     f.write("\n")
-                print(f"[Legacy] Successfully bumped latest_date to {new_date}")
+                print(f"[Legacy] Successfully bumped latest_date to {report_date}")
             else:
                 print(f"[Legacy] Up to date (latest points release: {current_latest})")
         except Exception as e:
@@ -237,22 +264,39 @@ def auto_detect_points_history():
             res = subprocess.run(cmd, cwd=XWA_DIR, capture_output=True, text=True)
             commits = [line.strip() for line in res.stdout.strip().split("\n") if line.strip()]
 
+            existing_versions = {
+                str(update.get("version", "")).replace("50P", "").strip()
+                for update in xwa_hist.get("updates", [])
+            }
             new_commits = []
             for c in commits:
                 parts = c.split("|", 2)
-                if len(parts) == 3:
-                    c_date, c_hash, c_subj = parts
-                    if c_date > current_latest:
-                        new_commits.append((c_date, c_hash, c_subj))
+                if len(parts) != 3:
+                    continue
+                c_date, c_hash, c_subj = parts
+                if c_date <= current_latest:
+                    continue
+
+                # Only commits that name a 50P release are points updates.
+                # Card art / restriction commits must not move the date, and a
+                # commit for an already-recorded release (e.g. the 2.1.1 YASB
+                # sync committed on 2026-10-24) must not create a second entry.
+                version_match = re.search(r"50P\s+(\d+(?:\.\d+)+)", c_subj, re.IGNORECASE)
+                if not version_match:
+                    continue
+                version = version_match.group(1)
+                if version in existing_versions:
+                    continue
+                new_commits.append((c_date, c_hash, c_subj, version))
 
             if new_commits:
-                latest_commit = new_commits[0]
-                new_date, new_hash, new_subj = latest_commit
+                new_date, new_hash, new_subj, version = new_commits[0]
                 print(f"[XWA] Detected newer points update commit: {new_date} - {new_subj} ({new_hash})")
 
                 new_entry = {
                     "date": new_date,
-                    "version": new_subj,
+                    "version": f"50P {version}",
+                    "name": f"50P {version} Points Update",
                     "description": f"Automated points update from xwing-data2 ({new_hash})",
                     "steward": "X-Wing Alliance (XWA)",
                     "highlights": [f"Commit {new_hash}: {new_subj}"],
@@ -275,7 +319,7 @@ def main():
     parser.add_argument("--sync-submodules", action="store_true", default=True, help="Update git submodules")
     parser.add_argument("--no-submodules", action="store_false", dest="sync_submodules", help="Skip submodules update")
     parser.add_argument("--sync-j1mbob", action="store_true", help="Fetch & merge card fixes from J1mBob/xwing-data2")
-    parser.add_argument("--sync-legacy", action="store_true", help="Fetch & merge updates from Darker333/xwing-data2-legacy")
+    parser.add_argument("--sync-legacy", action="store_true", help="Fetch & merge updates from SogeMoge/xwing-data2-legacy")
     parser.add_argument("--sync-yasb", action="store_true", help="Patch points & loadouts from YASB (Raithos)")
     parser.add_argument("--detect-points", action="store_true", default=True, help="Auto-detect points updates and bump history")
 
@@ -288,7 +332,7 @@ def main():
         sync_j1mbob()
 
     if args.sync_legacy:
-        sync_legacy_darker()
+        sync_legacy_sogemoge()
 
     if args.sync_yasb:
         sync_yasb_fast_points()
