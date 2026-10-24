@@ -5,8 +5,14 @@
   "description": "Community continuation of the 2.5 ruleset with objective play and 50-point squad balancing.",
   "official_url": "https://xwing.life",
   "points_url": "https://www.xwing.life/points",
-  "latest_date": "2026-08-16",
+  "latest_date": "2026-10-11",
   "updates": [
+    {
+      "date": "2026-10-11",
+      "version": "50P 2.1.1",
+      "name": "50P 2.1.1 Hotfix",
+      "description": "Points and loadout hotfix for XWA 50-point play (61 pilot entries rebalanced)."
+    },
     {
       "date": "2026-08-16",
       "version": "50P 2.1",
