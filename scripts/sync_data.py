@@ -276,7 +276,14 @@ def auto_detect_points_history():
                 if len(parts) != 3:
                     continue
                 c_date, c_hash, c_subj = parts
-                if c_date <= current_latest:
+
+                # YASB sync commits carry the release date in the subject:
+                #   data: apply YASB 50P 2.2 points (2026-12-01)
+                # Use it instead of the workflow commit date (which can be days
+                # later), and only compare the effective date with the history.
+                release_match = re.search(r"\((\d{4}-\d{2}-\d{2})\)", c_subj)
+                release_date = release_match.group(1) if release_match else c_date
+                if release_date <= current_latest:
                     continue
 
                 # Only commits that name a 50P release are points updates.
@@ -289,7 +296,7 @@ def auto_detect_points_history():
                 version = version_match.group(1)
                 if version in existing_versions:
                     continue
-                new_commits.append((c_date, c_hash, c_subj, version))
+                new_commits.append((release_date, c_hash, c_subj, version))
 
             if new_commits:
                 new_date, new_hash, new_subj, version = new_commits[0]
