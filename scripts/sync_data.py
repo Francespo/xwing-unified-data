@@ -26,6 +26,11 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 XWA_DIR = ROOT_DIR / "xwing-data2"
 LEGACY_DIR = ROOT_DIR / "xwing-data2-legacy"
 POINTS_HISTORY_DIR = ROOT_DIR / "points_history"
+# Shared YASB parser/matcher, owned by the xwing-data2 submodule. Matching by
+# name alone silently skipped variants such as Anakin Skywalker (Delta-7b).
+YASB_SCRIPTS_DIR = XWA_DIR / "scripts"
+if YASB_SCRIPTS_DIR.exists():
+    sys.path.insert(0, str(YASB_SCRIPTS_DIR))
 
 
 def run_cmd(cmd: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
@@ -85,88 +90,122 @@ def sync_legacy_sogemoge():
     run_cmd(["git", "merge", "sogemoge/master", "--no-edit"], cwd=LEGACY_DIR, check=False)
 
 
-def normalize_xws(name: str) -> str:
-    """Canonicalize a card/pilot name to XWS format."""
-    return re.sub(r"[^a-z0-9]", "", name.lower())
-
-
 def sync_yasb_fast_points() -> int:
-    """Download YASB cards-common.coffee and patch points/loadouts in xwing-data2 JSONs.
-    Returns number of points changes patched."""
+    """Apply the current YASB snapshot to every pilot and upgrade.
+
+    This is a manual reconciliation pass, not the release-diff bot in
+    xwing-data2. It uses the shared matcher there (name + ship/faction +
+    xwsaddon/variant suffix) so repeated pilot names cannot overwrite a
+    different chassis (Han Solo Scum/Lando, Boba Fett Scum/Separatist, ...).
+    Returns the number of fields changed.
+    """
     print("\n=== Sincronizzazione Punti Lampo da YASB (Raithos) ===")
+    try:
+        from yasb_cards import (
+            build_pilot_index,
+            build_upgrade_index,
+            lookup_pilot,
+            lookup_upgrade,
+            parse_yasb,
+        )
+    except ImportError:
+        print(
+            "Cannot import scripts/yasb_cards.py from the xwing-data2 submodule; "
+            "run `git submodule update --init --recursive` first."
+        )
+        return 0
+
     url = "https://raw.githubusercontent.com/raithos/xwing/master/coffeescripts/content/cards-common.coffee"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "XWingUnifiedData-Sync/1.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             content = resp.read().decode("utf-8")
     except Exception as e:
         print(f"Failed to fetch YASB cards-common.coffee: {e}")
         return 0
 
-    pilot_points: dict[str, dict[str, int]] = {}
-    blocks = re.split(r'\n\s*name:\s*"', content)
-    for block in blocks[1:]:
-        name_match = re.match(r'^([^"]+)"', block)
-        if not name_match:
-            continue
-        name = name_match.group(1)
-        pts_match = re.search(r'\bpoints:\s*(\d+)', block)
-        loadout_match = re.search(r'\bloadout:\s*(\d+)', block)
-        ship_match = re.search(r'\bship:\s*"([^"]+)"', block)
-
-        if pts_match:
-            pts = int(pts_match.group(1))
-            loadout = int(loadout_match.group(1)) if loadout_match else 0
-            xws_key = normalize_xws(name)
-            pilot_points[xws_key] = {"points": pts, "loadout": loadout, "name": name}
-            if ship_match:
-                ship_xws = normalize_xws(ship_match.group(1))
-                pilot_points[f"{xws_key}-{ship_xws}"] = {"points": pts, "loadout": loadout, "name": name}
-
-    print(f"Found {len(pilot_points)} point definitions in YASB.")
+    entries = parse_yasb(content)
+    pilot_index = build_pilot_index(entries)
+    upgrade_index = build_upgrade_index(entries)
+    print(f"Found {len(entries)} card definitions in YASB.")
 
     pilots_dir = XWA_DIR / "data" / "pilots"
+    upgrades_dir = XWA_DIR / "data" / "upgrades"
     if not pilots_dir.exists():
         print(f"Pilots directory {pilots_dir} not found.")
         return 0
 
     changes_count = 0
+    unmatched_pilots = 0
     for json_file in pilots_dir.rglob("*.json"):
         try:
-            with open(json_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            ship_xws = normalize_xws(data.get("xws", json_file.stem))
+            data = json.loads(json_file.read_text(encoding="utf-8"))
+            ship = data.get("name") or data.get("xws") or ""
+            faction = data.get("faction") or ""
             modified = False
-
-            for p in data.get("pilots", []):
-                p_name = p.get("name", "")
-                p_xws = normalize_xws(p.get("xws", p_name))
-
-                match = pilot_points.get(f"{p_xws}-{ship_xws}") or pilot_points.get(p_xws)
-                if match:
-                    new_pts = match["points"]
-                    new_loadout = match["loadout"]
-                    old_cost = p.get("cost")
-                    old_loadout = p.get("loadout")
-
-                    if old_cost != new_pts:
-                        p["cost"] = new_pts
-                        modified = True
-                        changes_count += 1
-                    if new_loadout and old_loadout != new_loadout:
-                        p["loadout"] = new_loadout
-                        modified = True
-                        changes_count += 1
-
+            for pilot in data.get("pilots", []):
+                match = lookup_pilot(pilot_index, pilot, ship, faction)
+                if not match:
+                    unmatched_pilots += 1
+                    continue
+                if pilot.get("cost") != match["points"]:
+                    pilot["cost"] = match["points"]
+                    modified = True
+                    changes_count += 1
+                if match["loadout"] is not None and pilot.get("loadout") != match["loadout"]:
+                    pilot["loadout"] = match["loadout"]
+                    modified = True
+                    changes_count += 1
             if modified:
-                with open(json_file, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False)
-                    f.write("\n")
+                written = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+                json_file.write_text(written, encoding="utf-8")
         except Exception as e:
             print(f"Warning: could not process {json_file}: {e}")
 
-    print(f"Applied {changes_count} point/loadout updates from YASB.")
+    unmatched_upgrades = 0
+    if upgrades_dir.exists():
+        for json_file in upgrades_dir.glob("*.json"):
+            try:
+                data = json.loads(json_file.read_text(encoding="utf-8"))
+                if isinstance(data, list):
+                    items = data
+                elif isinstance(data, dict) and isinstance(data.get("upgrades"), list):
+                    items = data["upgrades"]
+                else:
+                    continue
+                modified = False
+                for upgrade in items:
+                    match = lookup_upgrade(upgrade_index, upgrade)
+                    if not match:
+                        unmatched_upgrades += 1
+                        continue
+                    cost = upgrade.get("cost")
+                    new_cost = match["points"]
+                    if isinstance(cost, dict):
+                        if cost.get("value") != new_cost:
+                            cost["value"] = new_cost
+                            modified = True
+                            changes_count += 1
+                    elif isinstance(cost, (int, float)):
+                        if cost != new_cost:
+                            upgrade["cost"] = new_cost
+                            modified = True
+                            changes_count += 1
+                    elif cost is None:
+                        upgrade["cost"] = {"value": new_cost}
+                        modified = True
+                        changes_count += 1
+                if modified:
+                    written = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+                    json_file.write_text(written, encoding="utf-8")
+            except Exception as e:
+                print(f"Warning: could not process {json_file}: {e}")
+
+    print(
+        f"Applied {changes_count} point/loadout updates from YASB "
+        f"({unmatched_pilots} pilots and {unmatched_upgrades} upgrades had no "
+        "confident match and were left unchanged)."
+    )
     return changes_count
 
 
